@@ -18,6 +18,7 @@
          {:local/root "../../kotoba-lang/langchain"}}}
   ;; clojure -M:run  -> drive the demo through one OperationActor
   :run {:main-opts ["-m" "ligniteops.sim"]}
+  :render-html {:main-opts ["-m" "ligniteops.render-html"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
