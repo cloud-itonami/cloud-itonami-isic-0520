@@ -1,76 +1,196 @@
 (ns ligniteops.render-html
-  "Build-time HTML renderer. Drives the REAL actor stack deterministically."
-  (:require [clojure.string :as str]
+  "Build-time HTML renderer for `docs/samples/operator-console.html`.
+
+  Closes flagship checklist item 2 (com-junkawasaki/root ADR-2607189300):
+  previous generators either were missing or mapped the wrong ledger/site
+  fields (`:subject`/`:id` instead of this actor's real `:site-id`), so the
+  committed sample page showed empty site ids and mis-attributed HARD holds.
+  This namespace drives the REAL actor stack
+  (`ligniteops.operation` -> `ligniteops.governor` -> `ligniteops.store`)
+  through a scenario adapted from this repo's own `ligniteops.sim` demo
+  driver (`clojure -M:dev:run`, ids match `ligniteops.store/demo-data`:
+  lignite-mine-1/lignite-mine-2/lignite-mine-3), trimmed to a representative
+  subset (three clean phase-3 auto-commits, one always-escalate
+  safety-concern flag approved by a human, and three distinct HARD-hold
+  reasons) and rendered deterministically — no invented numbers, no
+  timestamps in the page content, byte-identical across reruns against the
+  same seed.
+
+  Usage: `clojure -M:dev:render-html [out-file]`
+  (default `docs/samples/operator-console.html`)."
+  (:require [jp-go-dds.skin]
+            [clojure.string :as str]
             [ligniteops.store :as store]
             [ligniteops.operation :as op]
+            [ligniteops.advisor :as advisor]
             [langgraph.graph :as g]))
 
-(def ^:private op-p1 {:actor-id "op-1" :actor-role :shift-supervisor :phase 1})
-(def ^:private op-p3 {:actor-id "op-1" :actor-role :shift-supervisor :phase 3})
-(defn- exec! [actor tid request ctx] (g/run* actor {:request request :context ctx} {:thread-id tid}))
-(defn- approve! [actor tid] (g/run* actor {:approval {:status :approved :by "shift-supervisor-1"}} {:thread-id tid :resume? true}))
+;; ----------------------------- harness -----------------------------
 
-(defn run-demo! []
-  (let [db (store/seed-db) actor (op/build db)]
-    (exec! actor "t1" {:op :log-production-record :site-id "lignite-mine-1"
-                       :effect :propose :patch {:tonnage 5100 :shift "day"}} op-p1)
-    (approve! actor "t1")
-    (exec! actor "t2" {:op :log-production-record :site-id "lignite-mine-1"
-                       :effect :propose :patch {:tonnage 5300 :shift "night"}} op-p3)
-    (exec! actor "t3" {:op :schedule-maintenance :site-id "lignite-mine-1"
-                       :effect :propose :patch {:equipment "bucket-wheel-excavator-2" :window "2026-07-20"}} op-p3)
-    (exec! actor "t4" {:op :flag-safety-concern :site-id "lignite-mine-1"
-                       :effect :propose :patch {:concern "subsidence-crack-near-pit-rim" :confidence 0.95}} op-p3)
-    (approve! actor "t4")
-    (exec! actor "t5" {:op :log-production-record :site-id "lignite-mine-9"
-                       :effect :propose :patch {:tonnage 100}} op-p3)
+(def ^:private operator
+  {:actor-id "op-1" :actor-role :shift-supervisor :phase 3})
+
+(defn- exec! [actor tid request]
+  (g/run* actor {:request request :context operator} {:thread-id tid}))
+
+(defn- approve! [actor tid]
+  (g/run* actor {:approval {:status :approved :by "op-1"}}
+          {:thread-id tid :resume? true}))
+
+(defn run-demo!
+  "Runs a fresh seeded store through a scenario mixing every disposition
+  this actor can reach: lignite-mine-1 clears three ops that all auto-commit
+  clean at phase 3 (log-production-record, schedule-maintenance,
+  coordinate-shipment); lignite-mine-1's safety-concern flag ALWAYS
+  escalates (per `governor/always-escalate-ops`) even though clean and
+  high-confidence, and is approved by a human shift supervisor;
+  lignite-mine-2 (registered AND verified, so both checks below are
+  exercised in isolation, not conflated with a site-verification
+  failure) sees an advisor that drafts a non-`:propose` `:effect` (an
+  attempted direct actuation) HARD-blocked on `:effect-not-propose`,
+  then a proposal that has drifted into the permanently-excluded
+  blasting/overburden/extraction-sequencing scope HARD-blocked on
+  `:scope-excluded`; lignite-mine-3 (registered but NOT `:verified?` in
+  the seed data) HARD-holds on `:site-unverified`. None of the HARD
+  holds ever reach a human. Returns the resulting store — every field
+  read by `render` below is real governor/store output, not a
+  hand-typed copy."
+  []
+  (let [db (store/seed-db)
+        actor (op/build db)
+        rogue-actor (op/build db {:advisor (reify advisor/Advisor
+                                             (-advise [_ st req]
+                                               (assoc (advisor/infer st req) :effect :commit)))})]
+    (exec! actor "lignite1-production" {:op :log-production-record :site-id "lignite-mine-1"
+                                        :patch {:tonnage 5100 :shift "day"}})
+    (exec! actor "lignite1-maintenance" {:op :schedule-maintenance :site-id "lignite-mine-1"
+                                         :patch {:equipment "bucket-wheel-excavator-2" :window "2026-07-20"}})
+    (exec! actor "lignite1-shipment" {:op :coordinate-shipment :site-id "lignite-mine-1"
+                                      :patch {:carrier "rail-co-1" :tonnage 5100}})
+
+    (exec! actor "lignite1-safety" {:op :flag-safety-concern :site-id "lignite-mine-1"
+                                    :patch {:concern "subsidence crack observed near pit rim" :confidence 0.95}})
+    (approve! actor "lignite1-safety")
+
+    (exec! rogue-actor "lignite2-rogue-shipment" {:op :coordinate-shipment :site-id "lignite-mine-2"
+                                                  :patch {:carrier "rail-co-1"}})
+
+    (exec! actor "lignite2-scope" {:op :schedule-maintenance :site-id "lignite-mine-2"
+                                   :out-of-scope? true :patch {}})
+
+    (exec! actor "lignite3-production" {:op :log-production-record :site-id "lignite-mine-3"
+                                        :patch {:tonnage 100}})
     db))
 
-(defn- esc [v] (-> (str v) (str/replace "&" "&amp;") (str/replace "<" "&lt;") (str/replace ">" "&gt;")))
-(defn- last-fact-for [ledger sid] (last (filter #(= (:subject %) sid) ledger)))
-(defn- status-cell [ledger sid]
-  (let [f (last-fact-for ledger sid)]
-    (cond (nil? f) "<span class=\"muted\">no activity</span>"
+;; ----------------------------- rendering -----------------------------
+
+(defn- esc [v]
+  (-> (str v)
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")))
+
+(defn- last-fact-for [ledger site-id]
+  (last (filter #(= (:site-id %) site-id) ledger)))
+
+(defn- status-cell [ledger site-id]
+  (let [f (last-fact-for ledger site-id)]
+    (cond
+      (nil? f) "<span class=\"muted\">no activity</span>"
       (= :committed (:t f)) "<span class=\"ok\">committed</span>"
-      (= :approval-granted (:t f)) "<span class=\"ok\">approved</span>"
-      (= :governor-hold (:t f)) (let [rule (-> f :basis first)] (str "<span class=\"critical\">HARD hold: " (esc (name (or rule :unknown))) "</span>"))
+      (= :approval-granted (:t f)) "<span class=\"ok\">approved &amp; committed</span>"
+      (= :governor-hold (:t f))
+      (let [rule (-> f :violations first :rule)]
+        (case rule
+          :site-unverified "<span class=\"critical\">HARD hold &middot; unverified site</span>"
+          :effect-not-propose "<span class=\"critical\">HARD hold &middot; direct-actuation attempt</span>"
+          :scope-excluded "<span class=\"critical\">HARD hold &middot; scope-excluded</span>"
+          (str "<span class=\"critical\">HARD hold &middot; " (esc (name (or rule :unknown))) "</span>")))
       (= :approval-requested (:t f)) "<span class=\"warn\">awaiting approval</span>"
       :else "<span class=\"muted\">in progress</span>")))
-(defn- ledger-row [{:keys [t op subject disposition basis]}]
+
+(defn- site-row [ledger {:keys [site-id name registered? verified?]}]
+  (format "        <tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+          (esc site-id) (esc name)
+          (if (and registered? verified?)
+            "<span class=\"ok\">registered &amp; verified</span>"
+            "<span class=\"warn\">registered, unverified</span>")
+          (status-cell ledger site-id)))
+
+(defn- ledger-row [{:keys [t op site-id disposition basis]}]
   (format "        <tr><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>"
-          (esc (name t)) (esc (name (or op :n-a))) (esc subject)
-          (esc (or (some->> basis (map name) (str/join ", ")) (some-> disposition name) ""))))
-(def ^:private gate-rows
-  ["        <tr><td><code>:log-production-record</code></td><td><span class=\"warn\">phase-1 always approval; phase-3 auto-commit when clean</span></td></tr>"
-   "        <tr><td><code>:flag-safety-concern</code></td><td><span class=\"warn\">ALWAYS human approval (safety)</span></td></tr>"
-   "        <tr><td><code>:schedule-maintenance</code></td><td><span class=\"warn\">registered + verified site required</span></td></tr>"
-   "        <tr><td><code>:coordinate-shipment</code></td><td><span class=\"warn\">ALWAYS human approval (actuation)</span></td></tr>"])
-(defn render [db]
+          (esc (name t)) (esc (name (or op :n-a))) (esc site-id)
+          (esc (or (some->> basis (map #(if (keyword? %) (name %) (str %))) (str/join ", "))
+                   (some-> disposition name)
+                   ""))))
+
+(def ^:private action-gate-rows
+  ;; Static description of this actor's own closed op contract
+  ;; (README `Ops` table, `ligniteops.governor`/`ligniteops.phase`) —
+  ;; documentation of fixed behavior, not runtime telemetry, so it is
+  ;; legitimately hand-described rather than derived from a live run.
+  ["        <tr><td><code>:log-production-record</code></td><td><span class=\"ok\">phase-3 auto when clean</span></td></tr>"
+   "        <tr><td><code>:schedule-maintenance</code></td><td><span class=\"ok\">phase-3 auto when clean</span></td></tr>"
+   "        <tr><td><code>:coordinate-shipment</code></td><td><span class=\"ok\">phase-3 auto when clean</span></td></tr>"
+   "        <tr><td><code>:flag-safety-concern</code></td><td><span class=\"warn\">ALWAYS human approval &middot; never auto, any phase</span></td></tr>"])
+
+(defn render
+  "Renders the full operator-console.html document from a store `db`
+  that has already run `run-demo!` (or any other real scenario)."
+  [db]
   (let [ledger (vec (store/ledger db))
-        sites (->> (store/all-sites db) (sort-by :id))
-        srow (fn [s] (format "        <tr><td>%s</td><td>%s</td><td>%s</td></tr>" (esc (:id s)) (esc (or (:status s) "-")) (status-cell ledger (:id s))))
-        srows (str/join "\n" (map srow sites))
-        lrows (str/join "\n" (map ledger-row ledger))]
-    (str "<html><head><meta charset=\"utf-8\"><title>cloud-itonami-isic-0520</title>"
-     "<style>body{font:14px/1.5 sans-serif;margin:0;color:#1a1a1a;background:#f5f5f5}"
-     ".bar{background:#2a1a0a;color:#fff;padding:1.2rem 2rem}.bar h1{margin:0;font-size:1.15rem}"
-     "main{max-width:980px;margin:1.5rem auto;padding:0 1rem}"
-     ".card{background:#fff;border-radius:8px;padding:1.2rem 1.4rem;margin-bottom:1.2rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}"
-     ".muted{color:#777;font-size:.82rem}table{border-collapse:collapse;width:100%;font-size:.85rem}"
-     "th,td{text-align:left;padding:.42rem .5rem;border-bottom:1px solid #eee}th{font-weight:600;color:#555}"
-     ".ok{color:#0a7d33}.warn{color:#9a6700}.critical{color:#b41010;font-weight:600}"
-     "code{background:#f0f0f0;padding:.1rem .3rem;border-radius:3px;font-size:.8rem}</style></head><body>"
-     "<header class=\"bar\"><h1>Lignite mining ops (ISIC 0520) — <code>ligniteops</code></h1></header><main>"
-     "<section class=\"card\"><h2>Mine sites</h2>"
-     "<p class=\"muted\">Demo from <code>ligniteops.store</code> via <code>ligniteops.render-html</code>. No invented data.</p>"
-     "<table><thead><tr><th>Site</th><th>Status</th><th>Last op</th></tr></thead><tbody>" srows "</tbody></table></section>"
-     "<section class=\"card\"><h2>Action gate</h2>"
-     "<table><thead><tr><th>Op</th><th>Gate</th></tr></thead><tbody>" (str/join "\n" gate-rows) "</tbody></table></section>"
-     "<section class=\"card\"><h2>Audit ledger</h2>"
-     "<table><thead><tr><th>Fact</th><th>Op</th><th>Subject</th><th>Basis</th></tr></thead><tbody>" lrows "</tbody></table></section>"
-     "</main></body></html>")))
+        sites (store/all-sites db)
+        site-rows (str/join "\n" (map (partial site-row ledger) sites))
+        ledger-rows (str/join "\n" (map ledger-row ledger))]
+    (str
+     "<html><head><meta charset=\"utf-8\"><title>cloud-itonami-isic-0520 &middot; lignite-mining operations coordination</title><style>"
+     (jp-go-dds.skin/dds+skin)
+     "</style></head><body>\n"
+     "<header class=\"bar\">\n"
+     "  <h1>Lignite mining operations coordination (ISIC 0520) — Operator Console</h1>\n"
+     "  <span class=\"badge\">read-only sample · governor-gated · never touches extraction/blasting/mine-safety-authority decisions</span>\n"
+     "</header>\n"
+     "<main>\n"
+     "  <section class=\"card\">\n"
+     "    <h2>Mine sites</h2>\n"
+     "    <p class=\"muted\">Demo snapshot — build-time-generated from <code>ligniteops.store</code> via <code>ligniteops.render-html</code> (<code>clojure -M:dev:render-html</code>), regenerated nightly.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Site</th><th>Name</th><th>Registration status</th><th>Last coordination status</th></tr></thead>\n"
+     "      <tbody>\n"
+     site-rows "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+     "  <section class=\"card\">\n"
+     "    <h2>Action gate (LigniteMiningGovernor)</h2>\n"
+     "    <p class=\"muted\">HARD holds cannot be overridden. Extraction sequencing, blasting/drilling/cutting schedules, overburden-removal sequencing and mine-safety-authority decisions are permanently out of scope — see governor scope-exclusion.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Op</th><th>Gate</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" action-gate-rows) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+     "  <section class=\"card\">\n"
+     "    <h2>Audit ledger (this run)</h2>\n"
+     "    <p class=\"muted\">Append-only decision-fact log — every proposal, hold and commit this scenario produced.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Fact</th><th>Op</th><th>Site</th><th>Basis</th></tr></thead>\n"
+     "      <tbody>\n"
+     ledger-rows "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+     "</main>\n"
+     "</body></html>\n")))
+
 (defn -main [& args]
   (let [out (or (first args) "docs/samples/operator-console.html")
-        db (run-demo!) f (java.io.File. out)]
-    (.. f getParentFile mkdirs) (spit f (render db))
-    (println "wrote" out "(" (count (store/ledger db)) "ledger facts )")))
+        out-file (java.io.File. out)
+        db (run-demo!)
+        html (render db)]
+    (when-let [parent (.getParentFile out-file)]
+      (.mkdirs parent))
+    (spit out-file html)
+    (println "wrote" out "(" (count (store/ledger db)) "ledger facts,"
+             (count (store/coordination-log db)) "committed coordination records )")))
