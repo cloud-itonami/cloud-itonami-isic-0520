@@ -6,7 +6,10 @@
  ;; robotics (blueprint.edn :itonami.blueprint/robotics false: this
  ;; is a back-office coordination actor, never a physical-actuation
  ;; one -- unlike cloud-itonami-isic-0891's robotics-gated extraction).
- :deps {io.github.kotoba-lang/langgraph
+ :deps {io.github.kotoba-lang/jp-go-digital-design-system
+        {:git/url "https://github.com/kotoba-lang/jp-go-digital-design-system"
+         :git/sha "83db99546eabc53613ae826ea41d1533a3c574af"}
+        io.github.kotoba-lang/langgraph
         {:git/sha "a332a770a0d2b5193f81b54483bb954fb29ef8d7"}}
  :aliases
  {;; monorepo-internal dev -- pin transitive langgraph/langchain to
@@ -15,9 +18,13 @@
         {io.github.kotoba-lang/langgraph
          {:local/root "../../kotoba-lang/langgraph"}
          io.github.kotoba-lang/langchain
-         {:local/root "../../kotoba-lang/langchain"}}}
+         {:local/root "../../kotoba-lang/langchain"}
+         io.github.kotoba-lang/jp-go-digital-design-system
+         {:local/root "../../kotoba-lang/jp-go-digital-design-system"}}}
   ;; clojure -M:run  -> drive the demo through one OperationActor
   :run {:main-opts ["-m" "ligniteops.sim"]}
+  ;; clojure -M:dev:render-html [out-file] -> regenerate docs/samples/operator-console.html
+  ;; through the real actor (flagship checklist item 2, ADR-2607189300).
   :render-html {:main-opts ["-m" "ligniteops.render-html"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

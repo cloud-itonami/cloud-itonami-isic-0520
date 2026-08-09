@@ -73,6 +73,7 @@ not a rollout milestone still to come — matching
 ```bash
 clojure -M:test   # run the full suite
 clojure -M:run    # walk the demo scenarios (ligniteops.sim)
+clojure -M:dev:render-html  # regenerate docs/samples/operator-console.html via the real actor
 clojure -M:lint    # clj-kondo
 ```
 
