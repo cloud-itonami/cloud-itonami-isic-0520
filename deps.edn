@@ -26,9 +26,9 @@
          {:local/root "../../kotoba-lang/langchain"}
          io.github.kotoba-lang/jp-go-digital-design-system
          {:local/root "../../kotoba-lang/jp-go-digital-design-system"}}}
-  ;; clojure -M:run  -> drive the demo through one OperationActor
+  ;; kbb -M:run  -> drive the demo through one OperationActor
   :run {:main-opts ["-m" "ligniteops.sim"]}
-  ;; clojure -M:dev:render-html [out-file] -> regenerate docs/samples/operator-console.html
+  ;; kbb -M:dev:render-html [out-file] -> regenerate docs/samples/operator-console.html
   ;; through the real actor (flagship checklist item 2, ADR-2607189300).
   :render-html {:main-opts ["-m" "ligniteops.render-html"]}
   :test {:extra-paths ["test"]

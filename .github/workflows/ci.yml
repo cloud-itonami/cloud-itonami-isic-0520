@@ -13,5 +13,5 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - run: clojure -M:lint
-      - run: clojure -M:test
+      - run: kbb -M:lint
+      - run: kbb -M:test
