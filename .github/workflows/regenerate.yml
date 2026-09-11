@@ -21,7 +21,7 @@ jobs:
         with: { cli: latest }
       - name: regenerate
         working-directory: orgs/cloud-itonami/cloud-itonami-isic-0520
-        run: clojure -M:dev:render-html
+        run: kbb -M:dev:render-html
       - name: verify
         working-directory: orgs/cloud-itonami/cloud-itonami-isic-0520
         run: |
