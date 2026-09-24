@@ -1,5 +1,5 @@
 (ns ligniteops.advisor-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [ligniteops.advisor :as advisor]
             [ligniteops.store :as store]))
 
